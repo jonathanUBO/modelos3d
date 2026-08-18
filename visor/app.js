@@ -164,6 +164,15 @@ const viewerState = {
     satelliteTexture: null, // null hasta que se sepa si la textura cargó o no
     usingTexture: false,
     defaultCamera: null, // { position, up, target } para "Restablecer vista"
+    contours: null,      // { minor, main } una vez cargadas las curvas de nivel
+    // 0 = todas, 1 = solo maestras, 2 = ninguna. Arranca en "solo maestras":
+    // con el intervalo secundario de una carta 1:25.000 las curvas se cuentan
+    // por miles y, aunque cada línea sea tenue, al superponerse tapaban la foto
+    // satelital -- y no se pueden dibujar más finas de un píxel (ver el
+    // comentario de los materiales en addContourLines3D). Las maestras solas
+    // mantienen la lectura del relieve dejando ver el terreno; el botón de la
+    // barra permite volver a todas de un toque.
+    contourMode: 1,
 };
 
 if (!modelId) {
@@ -219,15 +228,26 @@ function addContourLines3D(object, dir, id, recomputeUV = true) {
         })
         .then((data) => {
             const contourGroup = new THREE.Group();
-            // Mismo color y opacidad que el anaglifo 2D (overlay_contours en
-            // contours.py: line_color blanco, alpha_minor=0.6, alpha_main=0.9)
-            // para que las curvas se vean iguales en ambos productos -- la
-            // jerarquía maestra/secundaria la da el contraste de opacidad,
-            // igual que en el 2D, no un color distinto.
-            const minorMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 });
-            const mainMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 });
+            // Un grupo por tipo de curva para poder atenuarlas u ocultarlas de
+            // forma independiente desde la barra de herramientas.
+            const minorGroup = new THREE.Group();
+            const mainGroup = new THREE.Group();
+            contourGroup.add(minorGroup);
+            contourGroup.add(mainGroup);
 
-            const buildLines = (polylines, material) => {
+            // El anaglifo 2D usa alpha_minor=0.6 / alpha_main=0.9
+            // (overlay_contours en contours.py), pero aquí van bastante más
+            // tenues a propósito: sobre la foto satelital del modelo 3D esas
+            // opacidades tapaban el terreno. No se pueden dibujar más finas --
+            // WebGL ignora `linewidth` en LineBasicMaterial y todas las líneas
+            // miden un píxel, así que el único margen real para bajarles peso
+            // visual es la opacidad (y reducir cuántas se muestran, ver el
+            // botón de curvas en la barra de herramientas). Se mantiene la
+            // jerarquía maestra/secundaria por contraste, igual que en el 2D.
+            const minorMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25 });
+            const mainMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 });
+
+            const buildLines = (polylines, material, group) => {
                 (polylines || []).forEach((pts) => {
                     if (pts.length < 2) return;
                     const positions = new Float32Array(pts.length * 3);
@@ -238,12 +258,16 @@ function addContourLines3D(object, dir, id, recomputeUV = true) {
                     }
                     const geometry = new THREE.BufferGeometry();
                     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-                    contourGroup.add(new THREE.Line(geometry, material));
+                    group.add(new THREE.Line(geometry, material));
                 });
             };
 
-            buildLines(data.minor, minorMaterial);
-            buildLines(data.main, mainMaterial);
+            buildLines(data.minor, minorMaterial, minorGroup);
+            buildLines(data.main, mainMaterial, mainGroup);
+
+            // Referencias para el botón de curvas (ver updateContourState).
+            viewerState.contours = { minor: minorGroup, main: mainGroup };
+            applyContourMode();
 
             // Se agrega como hijo del objeto del terreno: hereda
             // automáticamente su misma rotación (Z de elevación -> Y) y su
@@ -629,6 +653,33 @@ btnTexture.addEventListener('click', () => {
     updateToolbarState();
 });
 
+const btnContours = document.getElementById('btn-contours');
+
+const CONTOUR_MODES = [
+    { minor: true, main: true, icono: '〰', etiqueta: 'Curvas: todas' },
+    { minor: false, main: true, icono: '≈', etiqueta: 'Curvas: solo maestras' },
+    { minor: false, main: false, icono: '⃠', etiqueta: 'Curvas: ninguna' },
+];
+
+function applyContourMode() {
+    const modo = CONTOUR_MODES[viewerState.contourMode];
+    if (viewerState.contours) {
+        viewerState.contours.minor.visible = modo.minor;
+        viewerState.contours.main.visible = modo.main;
+    }
+    btnContours.textContent = modo.icono;
+    btnContours.title = modo.etiqueta;
+    btnContours.setAttribute('aria-label', modo.etiqueta);
+    btnContours.classList.toggle('active', modo.minor || modo.main);
+    // Sin curvas cargadas todavía no hay nada que alternar.
+    btnContours.disabled = !viewerState.contours;
+}
+
+btnContours.addEventListener('click', () => {
+    viewerState.contourMode = (viewerState.contourMode + 1) % CONTOUR_MODES.length;
+    applyContourMode();
+});
+
 btnFullscreen.addEventListener('click', () => {
     if (!document.fullscreenElement) {
         document.documentElement.requestFullscreen?.().catch(() => {});
@@ -649,6 +700,7 @@ function updateToolbarState() {
     btnTexture.textContent = viewerState.usingTexture ? '🛰' : '⛰';
 }
 updateToolbarState();
+applyContourMode();
 
 // Panel de información: colapsable con un toque, para no tapar el modelo en
 // pantallas de celular sostenidas en vertical.
