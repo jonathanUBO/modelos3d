@@ -326,6 +326,14 @@ function probeUrl(url) {
         .catch(() => false);
 }
 
+// Reintentos mientras GitHub Pages termina de construir el sitio. Subir los
+// archivos y que la URL responda son dos cosas distintas: hasta que la
+// compilación acaba, la malla da 404 aunque ya esté publicada. Antes eso se veía
+// como un error definitivo -- el QR recién impreso "no funcionaba" y solo cabía
+// recargar a ciegas. Ahora el visor lo detecta y espera solo.
+const REINTENTOS_PUBLICACION = 12;
+const ESPERA_REINTENTO_MS = 5000;
+
 function loadModel(id, dir) {
     // `dir` es la ruta (relativa a la raíz servida) de la carpeta donde viven
     // los productos de esta carta/área (ver parámetro `dir` en la URL, que
@@ -347,24 +355,48 @@ function loadModel(id, dir) {
     //
     // Se prueba primero el GLB y se cae al OBJ si no está, así el mismo visor
     // sirve en los dos casos sin bifurcar la URL del QR.
-    probeUrl(glbUrl).then((hasGlb) => {
-        if (hasGlb) {
-            new GLTFLoader().load(
-                glbUrl,
-                (gltf) => onModelLoaded(gltf.scene, id, dir, null),
-                onModelProgress,
-                onModelError
-            );
-        } else {
-            const texturePromise = loadSatelliteTexture(textureUrl);
-            new OBJLoader().load(
-                objUrl,
-                (object) => onModelLoaded(object, id, dir, texturePromise),
-                onModelProgress,
-                onModelError
-            );
-        }
-    });
+    const intentar = (intento) => {
+        Promise.all([probeUrl(glbUrl), probeUrl(objUrl)]).then(([hasGlb, hasObj]) => {
+            if (hasGlb) {
+                new GLTFLoader().load(
+                    glbUrl,
+                    (gltf) => onModelLoaded(gltf.scene, id, dir, null),
+                    onModelProgress,
+                    onModelError
+                );
+                return;
+            }
+            if (hasObj) {
+                const texturePromise = loadSatelliteTexture(textureUrl);
+                new OBJLoader().load(
+                    objUrl,
+                    (object) => onModelLoaded(object, id, dir, texturePromise),
+                    onModelProgress,
+                    onModelError
+                );
+                return;
+            }
+            // Ningún formato disponible. Si el sitio acaba de publicarse, es
+            // cuestión de esperar; se distingue de un error real reintentando un
+            // rato antes de rendirse, e informando de la causa probable en vez
+            // del mensaje genérico anterior.
+            if (intento < REINTENTOS_PUBLICACION) {
+                const restante = (REINTENTOS_PUBLICACION - intento) * (ESPERA_REINTENTO_MS / 1000);
+                loadingElement.textContent = 'Publicando el modelo, espere...';
+                infoElement.innerHTML =
+                    'El modelo todavía no está disponible en el servidor.<br>' +
+                    'Si la carta se acaba de generar, GitHub Pages aún está construyendo el sitio.<br>' +
+                    `Reintentando automáticamente (quedan ${Math.round(restante)} s).`;
+                setTimeout(() => intentar(intento + 1), ESPERA_REINTENTO_MS);
+                return;
+            }
+            loadingElement.style.display = 'none';
+            infoElement.innerHTML =
+                '<span style="color:#ffcc00;">No se encontró el modelo con ID ' + id + '.</span><br>' +
+                'Verifique que el enlace del QR sea correcto y que la carta haya terminado de publicarse.';
+        });
+    };
+    intentar(0);
 }
 
 function onModelLoaded(object, id, dir, texturePromise) {
@@ -548,9 +580,15 @@ function onModelProgress(xhr) {
     }
 
 function onModelError(error) {
+    // Aquí solo se llega cuando el archivo SÍ existe (ya lo confirmó el sondeo
+    // previo) pero no se pudo leer: descarga interrumpida o malla corrupta. El
+    // caso "todavía no publicado" se trata aparte, en loadModel, porque su
+    // solución es esperar y no tiene nada que ver con un archivo dañado.
     console.error('Error al cargar el modelo:', error);
     loadingElement.style.display = 'none';
-    infoElement.innerHTML = '<span style="color:red;">Error al cargar el modelo 3D. Asegúrese de que el ID sea correcto y el archivo exista.</span>';
+    infoElement.innerHTML =
+        '<span style="color:red;">No se pudo leer el modelo 3D.</span><br>' +
+        'El archivo existe pero la descarga falló o llegó dañada. Reintente recargando la página.';
 }
 
 // Redimensionamiento de la ventana (incluye el giro de pantalla en
